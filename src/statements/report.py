@@ -19,6 +19,7 @@ CSV_HEADERS = [
     "amazon_order_id",
     "receipt_file",
     "receipt_status",
+    "decision_key",
 ]
 
 
@@ -89,15 +90,15 @@ def render_markdown(rows: list[ClassifiedRow], year: int, month: int) -> str:
     lines.append("## 明細")
     lines.append("")
     lines.append(
-        "| 日付 | 内容 | 金融機関 | 金額 | 分類 | 比率 | 事業額 | 理由 | Amazon注文 | 領収書 | 状態 |"
+        "| 日付 | 内容 | 金融機関 | 金額 | 分類 | 比率 | 事業額 | 理由 | Amazon注文 | 領収書 | 状態 | 判定キー |"
     )
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for r in rows:
         d = r.to_dict()
         lines.append(
             "| {date} | {description} | {institution} | {amount} | "
             "{classification} | {business_ratio} | {business_amount} | "
-            "{reason} | {amazon_order_id} | {receipt_file} | {receipt_status} |".format(
+            "{reason} | {amazon_order_id} | {receipt_file} | {receipt_status} | {decision_key} |".format(
                 **{k: str(d.get(k, "")) for k in CSV_HEADERS}
             )
         )

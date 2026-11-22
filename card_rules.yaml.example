@@ -7,37 +7,48 @@ rules:
     reason: "クラウド基盤費は事業用"
     business_ratio: null
     match:
-      description_keywords: ["AWS", "Amazon Web Services"]
-      institutions: []
+      description_regex: "(?i)\\baws\\b|amazon web services"
 
   - name: "GitHub business tool"
     classification: BUSINESS
     reason: "開発ツールは事業用"
     business_ratio: null
     match:
-      description_keywords: ["GitHub", "GITHUB"]
+      description_keywords: ["GitHub"]
 
-  - name: "telecom prorated"
+  - name: "telecom category prorated"
+    classification: PRORATED
+    reason: "通信費は事業30%で按分"
+    business_ratio: 0.3
+    match:
+      major_category: ["通信費"]
+
+  - name: "telecom keyword fallback"
     classification: PRORATED
     reason: "通信費は事業30%で按分"
     business_ratio: 0.3
     match:
       description_keywords: ["携帯", "スマホ", "通信"]
-      major_category: ["通信費"]
 
-  - name: "utilities prorated"
+  - name: "utilities category prorated"
+    classification: PRORATED
+    reason: "水道・光熱費は事業20%で按分"
+    business_ratio: 0.2
+    match:
+      major_category: ["水道・光熱費"]
+
+  - name: "utilities keyword fallback"
     classification: PRORATED
     reason: "水道・光熱費は事業20%で按分"
     business_ratio: 0.2
     match:
       description_keywords: ["電力", "ガス", "水道"]
-      major_category: ["水道・光熱費"]
 
-  - name: "personal memo"
+  - name: "note service personal"
     classification: PERSONAL
-    reason: "メモ指定により私用"
+    reason: "note は私用"
     match:
-      description_regex: "私用|personal"
+      description_regex: "(?i)(^|[^a-z])note([^a-z]|$)|note株式会社"
 
   - name: "cafe personal"
     classification: PERSONAL
@@ -59,7 +70,7 @@ rules:
     classification: REVIEW
     reason: "タスク管理サービスは要確認"
     match:
-      description_keywords: ["Remember The Milk", "RTM"]
+      description_keywords: ["Remember The Milk", "REMEMBERTHEMILK"]
 
   - name: "amazon business supplies"
     classification: BUSINESS

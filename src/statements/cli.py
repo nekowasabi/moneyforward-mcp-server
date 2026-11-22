@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from src.statements.amazon import load_amazon_orders
+from src.statements.amazon import is_amazon_description, load_amazon_orders, match_amazon_orders
 from src.statements.decisions import DecisionStore
 from src.statements.models import Classification, Transaction
 from src.statements.pipeline import classify_month
@@ -84,12 +84,20 @@ def cmd_decide(args: argparse.Namespace) -> int:
     classification = Classification(str(args.classification))
     ratio = getattr(args, "ratio", None)
     ratio_f: float | None = float(ratio) if ratio is not None else None
-    key = store.record(
-        description=str(args.description),
-        classification=classification.value,
-        reason=str(args.reason),
-        business_ratio=ratio_f,
-    )
+    amazon_title = getattr(args, "amazon_item_title", None)
+    merchant_wide = bool(getattr(args, "merchant_wide", False))
+    try:
+        key = store.record(
+            description=str(args.description),
+            classification=classification.value,
+            reason=str(args.reason),
+            business_ratio=ratio_f,
+            amazon_item_title=amazon_title,
+            merchant_wide=merchant_wide,
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     print(key)
     return 0
 
@@ -108,15 +116,82 @@ def review_rows(
     input_fn: Callable[[str], str] = input,
     print_fn: Callable[[str], None] = print,
     store: DecisionStore | None = None,
+    amazon_orders: list[Any] | None = None,
+    amazon_window_days: int = 3,
+    merchant_wide: bool = False,
 ) -> int:
     """Interactively review REVIEW rows; testable via injected input_fn."""
     target = store or DecisionStore()
+    orders = list(amazon_orders or [])
     saved = 0
     for row in rows:
         result = row.result
         if result.classification != Classification.REVIEW:
             continue
         txn = row.transaction
+        is_amazon = is_amazon_description(txn.description)
+        unique_title: str | None = None
+        if is_amazon:
+            candidates = (
+                match_amazon_orders(
+                    txn.description, txn.amount, txn.date, orders, amazon_window_days
+                )
+                if orders
+                else []
+            )
+            # Also honour an already-matched order id on the row when orders
+            # are not passed (e.g. classify_month ran with orders already).
+            if len(candidates) == 1:
+                unique_title = candidates[0].title
+            elif getattr(row, "amazon_order_id", None) and getattr(row, "decision_key", None):
+                # Row was matched during classify; title unknown here, so we
+                # cannot safely record without the title list.
+                unique_title = None
+            if unique_title is None and not merchant_wide:
+                print_fn(
+                    "Amazon明細は注文の一意な一致がないため、決定を記憶できません。"
+                    "この場限りの分類として扱います。"
+                )
+                print_fn(f"{txn.date} {txn.description} {txn.amount} : {result.reason}")
+                print_fn("one-off classification [BUSINESS/PERSONAL/PRORATED/skip]?")
+                try:
+                    answer = input_fn("> ").strip().upper()
+                except EOFError:
+                    break
+                if answer in ("", "SKIP", "S"):
+                    continue
+                if answer not in ("BUSINESS", "PERSONAL", "PRORATED", "REVIEW"):
+                    print_fn(f"unknown: {answer}, skipped")
+                    continue
+                ratio: float | None = None
+                if answer == "PRORATED":
+                    print_fn("business ratio (0-1)?")
+                    try:
+                        raw = input_fn("> ").strip()
+                    except EOFError:
+                        break
+                    try:
+                        ratio = float(raw)
+                    except ValueError:
+                        print_fn("invalid ratio, skipped")
+                        continue
+                print_fn("reason?")
+                try:
+                    reason = input_fn("> ").strip()
+                except EOFError:
+                    break
+                if not reason:
+                    reason = "human review (one-off)"
+                # One-off: update in memory, do not persist.
+                from src.statements.models import ClassificationResult
+
+                row.result = ClassificationResult(
+                    classification=Classification(answer),
+                    reason=reason,
+                    business_ratio=ratio,
+                    source="default",
+                )
+                continue
         print_fn(f"{txn.date} {txn.description} {txn.amount} : {result.reason}")
         print_fn("classification [BUSINESS/PERSONAL/PRORATED/skip]?")
         try:
@@ -128,7 +203,7 @@ def review_rows(
         if answer not in ("BUSINESS", "PERSONAL", "PRORATED", "REVIEW"):
             print_fn(f"unknown: {answer}, skipped")
             continue
-        ratio: float | None = None
+        ratio = None
         if answer == "PRORATED":
             print_fn("business ratio (0-1)?")
             try:
@@ -147,7 +222,22 @@ def review_rows(
             break
         if not reason:
             reason = "human review"
-        target.record(txn.description, answer, reason, ratio)
+        try:
+            if is_amazon and unique_title is not None:
+                target.record(
+                    txn.description, answer, reason, ratio, amazon_item_title=unique_title
+                )
+            elif is_amazon and merchant_wide:
+                target.record(txn.description, answer, reason, ratio, merchant_wide=True)
+            elif is_amazon:
+                # Should not reach here (handled above), but guard.
+                print_fn("決定を記憶できませんでした（一意な注文一致なし）。")
+                continue
+            else:
+                target.record(txn.description, answer, reason, ratio)
+        except ValueError as e:
+            print_fn(f"決定を記憶できませんでした: {e}")
+            continue
         saved += 1
     print_fn(f"saved {saved} decisions")
     return saved
@@ -158,8 +248,11 @@ def cmd_review(args: argparse.Namespace) -> int:
     txns = load_transactions_csv(args.statement_csv)
     rules = _resolve_rules(getattr(args, "rules", None))
     store = DecisionStore(getattr(args, "decisions", None) or None)
-    rows = classify_month(txns, rules, store, [], None)
-    review_rows(rows, input, print, store)
+    amazon_csv = getattr(args, "amazon_csv", None)
+    orders = load_amazon_orders(amazon_csv) if amazon_csv else []
+    merchant_wide = bool(getattr(args, "merchant_wide", False))
+    rows = classify_month(txns, rules, store, orders, None)
+    review_rows(rows, input, print, store, orders, 3, merchant_wide)
     return 0
 
 
@@ -189,6 +282,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_decide.add_argument("--ratio", default=None, type=float)
     p_decide.add_argument("--reason", required=True)
     p_decide.add_argument("--decisions", default=None)
+    p_decide.add_argument("--amazon-item-title", default=None)
+    p_decide.add_argument("--merchant-wide", action="store_true")
     p_decide.set_defaults(func=cmd_decide)
 
     p_list = sub.add_parser("decisions", help="List decisions")
@@ -200,6 +295,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_review.add_argument("--statement-csv", required=True)
     p_review.add_argument("--rules", default=None)
     p_review.add_argument("--decisions", default=None)
+    p_review.add_argument("--amazon-csv", default=None)
+    p_review.add_argument("--merchant-wide", action="store_true")
     p_review.set_defaults(func=cmd_review)
 
     return parser

@@ -52,8 +52,13 @@ class AmazonOrder:
 
 
 def is_amazon_description(description: str) -> bool:
-    """Check whether a statement description looks like Amazon."""
+    """Check whether a statement description looks like Amazon.
+
+    AWS cloud bills (e.g. "AMAZON WEB SERVICES") are NOT retail and return False.
+    """
     t = description.casefold()
+    if "web service" in t or "webservice" in t:
+        return False
     for kw in AMAZON_KEYWORDS:
         if kw.casefold() in t:
             return True

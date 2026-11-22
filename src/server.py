@@ -437,13 +437,17 @@ async def record_classification_decision(
     classification: str,
     reason: str,
     business_ratio: float | None = None,
+    amazon_item_title: str | None = None,
+    merchant_wide: bool = False,
 ) -> dict[str, Any]:
     """Record a human classification decision for future months."""
     from src.tools.statements import (
         record_classification_decision as record_impl,
     )
 
-    return await record_impl(description, classification, reason, business_ratio)
+    return await record_impl(
+        description, classification, reason, business_ratio, amazon_item_title, merchant_wide
+    )
 
 
 # Tool: List Classification Decisions

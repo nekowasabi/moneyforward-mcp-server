@@ -96,6 +96,7 @@ class ClassifiedRow:
     amazon_order_id: str | None = None
     receipt_file: str | None = None
     receipt_status: str = "not_required"
+    decision_key: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -113,4 +114,5 @@ class ClassifiedRow:
             "amazon_order_id": self.amazon_order_id or "",
             "receipt_file": self.receipt_file or "",
             "receipt_status": self.receipt_status,
+            "decision_key": self.decision_key or "",
         }

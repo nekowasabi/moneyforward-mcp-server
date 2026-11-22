@@ -24,7 +24,11 @@ from src.statements.amazon import (
     match_amazon_orders,
     parse_amazon_csv,
 )
-from src.statements.decisions import DecisionStore, normalize_description
+from src.statements.decisions import (
+    DecisionStore,
+    amazon_decision_key,
+    normalize_description,
+)
 from src.statements.models import (
     Classification,
     ClassificationResult,
@@ -593,3 +597,146 @@ async def test_mcp_tools_with_mocked_scraper(tmp_path, monkeypatch):
     r5 = await stmt_tools.list_classification_decisions()
     assert r5["status"] == "success"
     assert r5["data"]["count"] >= 1
+
+
+# --- FIX1 round 1 ---
+
+
+def test_example_category_alone_prorated():
+    example = Path("card_rules.yaml.example")
+    rules = load_rules(example)
+
+    def classify(desc: str, major: str = "") -> Classification:
+        return apply_rules(_txn(desc, major_category=major), rules).classification
+
+    # Category alone (no keyword) must be enough.
+    assert classify("Something Else", "通信費") == Classification.PRORATED
+    assert classify("Something Else", "水道・光熱費") == Classification.PRORATED
+    # Keyword fallbacks still work without category.
+    assert classify("携帯料金", "") == Classification.PRORATED
+    assert classify("東京電力", "") == Classification.PRORATED
+
+
+def test_note_service_personal_and_notebook_excluded():
+    example = Path("card_rules.yaml.example")
+    rules = load_rules(example)
+
+    def classify(desc: str) -> Classification:
+        return apply_rules(_txn(desc), rules).classification
+
+    assert classify("NOTE*PREMIUM") == Classification.PERSONAL
+    assert classify("note株式会社") == Classification.PERSONAL
+    # notebook must NOT be PERSONAL via the note rule
+    res = apply_rules(_txn("NOTEBOOK STAND"), rules)
+    assert res.classification != Classification.PERSONAL
+
+
+def test_aws_safer_and_web_services_not_amazon():
+    example = Path("card_rules.yaml.example")
+    rules = load_rules(example)
+    assert apply_rules(_txn("AWS Bill"), rules).classification == Classification.BUSINESS
+    assert apply_rules(_txn("AMAZON WEB SERVICES"), rules).classification == Classification.BUSINESS
+    # Bare substring should not trigger AWS business rule.
+    assert apply_rules(_txn("AWSSOME Service"), rules).classification == Classification.REVIEW
+    # AWS bills are not Amazon retail.
+    assert not is_amazon_description("AMAZON WEB SERVICES")
+    assert not is_amazon_description("Amazon Web Services")
+    assert is_amazon_description("AMAZON.CO.JP")
+
+
+def test_remember_milk_no_bare_rtm():
+    example = Path("card_rules.yaml.example")
+    rules = load_rules(example)
+    remember = [r for r in rules if "Remember" in r.name]
+    assert remember
+    r = remember[0]
+    assert r.matches(_txn("Remember The Milk Pro"))
+    assert r.matches(_txn("REMEMBERTHEMILK Pro"))
+    assert not r.matches(_txn("RTM gadget"))
+
+
+def test_amazon_decision_isolation(tmp_path):
+    from src.statements.amazon import AmazonOrder
+
+    dec_path = tmp_path / "dec.json"
+    store = DecisionStore(dec_path)
+    store.record(
+        "AMAZON.CO.JP",
+        "BUSINESS",
+        "paper",
+        None,
+        amazon_item_title="プリンタ用紙 A4",
+    )
+    orders_same = [AmazonOrder(date(2026, 10, 4), "A-1", 1500, "プリンタ用紙 A4")]
+    orders_diff = [AmazonOrder(date(2026, 10, 4), "A-2", 1500, "文具セット")]
+    txn = Transaction(
+        date=date(2026, 10, 5),
+        description="AMAZON.CO.JP",
+        amount=1500,
+        institution="Example Card",
+    )
+    rows_same = classify_month([txn], [], store, orders_same, None)
+    assert rows_same[0].result.source == "decision"
+    assert rows_same[0].result.classification == Classification.BUSINESS
+    assert rows_same[0].decision_key == amazon_decision_key("プリンタ用紙 A4")
+    rows_diff = classify_month([txn], [], store, orders_diff, None)
+    assert rows_diff[0].result.classification == Classification.REVIEW
+    assert rows_diff[0].result.source != "decision"
+    # Merchant-level non-Amazon decision still applies.
+    store.record("Example Cafe 123", "PERSONAL", "human", None)
+    rows_m = classify_month([_txn("Example Cafe 999")], [], store, [], None)
+    assert rows_m[0].result.source == "decision"
+    assert rows_m[0].result.classification == Classification.PERSONAL
+
+
+def test_amazon_merchant_decision_blocked_without_flag(tmp_path):
+    import pytest as _pytest
+
+    store = DecisionStore(tmp_path / "d.json")
+    with _pytest.raises(ValueError):
+        store.record("AMAZON.CO.JP", "PERSONAL", "x", None)
+    # lookup without item title must not return merchant blanket
+    assert store.lookup("AMAZON.CO.JP") is None
+    # explicitly merchant-wide is allowed and applied
+    key = store.record("AMAZON.CO.JP", "PERSONAL", "x", None, merchant_wide=True)
+    assert key
+    assert store.lookup("AMAZON.CO.JP") is not None
+
+
+def test_ambiguous_reason_includes_ids():
+    from src.statements.amazon import AmazonOrder
+
+    orders = [
+        AmazonOrder(date(2026, 10, 4), "A-1", 1500, "Item One"),
+        AmazonOrder(date(2026, 10, 5), "A-2", 1500, "Item Two"),
+    ]
+    txn = Transaction(
+        date=date(2026, 10, 5),
+        description="AMAZON",
+        amount=1500,
+        institution="Example Card",
+    )
+    rows = classify_month([txn], [], None, orders, None)
+    assert rows[0].result.classification == Classification.REVIEW
+    assert "A-1" in rows[0].result.reason
+    assert "A-2" in rows[0].result.reason
+
+
+def test_decision_key_in_csv_md(tmp_path):
+    rows = [
+        ClassifiedRow(
+            transaction=_txn("Shop A", 1000),
+            result=ClassificationResult(Classification.BUSINESS, "biz"),
+            receipt_status="missing",
+            decision_key="shop-a",
+        ),
+    ]
+    csv_path = tmp_path / "r.csv"
+    md_path = tmp_path / "r.md"
+    write_csv(rows, csv_path)
+    assert "decision_key" in csv_path.read_text(encoding="utf-8-sig")
+    assert "shop-a" in csv_path.read_text(encoding="utf-8-sig")
+    write_markdown(rows, 2026, 10, md_path)
+    md = md_path.read_text(encoding="utf-8")
+    assert "shop-a" in md
+    assert "判定キー" in md

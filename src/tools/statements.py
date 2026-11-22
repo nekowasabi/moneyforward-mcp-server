@@ -191,6 +191,8 @@ async def record_classification_decision(
     classification: str,
     reason: str,
     business_ratio: float | None = None,
+    amazon_item_title: str | None = None,
+    merchant_wide: bool = False,
 ) -> dict[str, Any]:
     """Record a human classification decision."""
     logger.info("record_classification_decision_called")
@@ -208,11 +210,18 @@ async def record_classification_decision(
         )
     try:
         store = DecisionStore()
-        key = store.record(description, cls.value, reason, business_ratio)
+        key = store.record(
+            description, cls.value, reason, business_ratio, amazon_item_title, merchant_wide
+        )
         from src.tools.common import build_success_response
 
         return build_success_response(
             {"key": key, "classification": cls.value}, source="local", cached=False
+        )
+    except ValueError as e:
+        return build_error_response(
+            message=str(e),
+            error_type="VALIDATION_ERROR",
         )
     except Exception as e:
         logger.error("record_decision_failed", error=str(e), exc_info=True)
