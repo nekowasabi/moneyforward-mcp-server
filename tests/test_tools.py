@@ -4,7 +4,7 @@ This module tests the MCP tools including response formatting,
 caching behavior, and error handling.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 

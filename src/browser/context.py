@@ -10,7 +10,6 @@ from typing import ClassVar
 
 import structlog
 from playwright.async_api import (
-    Browser,
     BrowserContext,
     Page,
     Playwright,

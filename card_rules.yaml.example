@@ -1,0 +1,69 @@
+# Card statement classification rules (example with fictional data).
+# Copy to ~/.config/moneyforward-mcp/card_rules.yaml and customize.
+# First match wins. Unmatched -> REVIEW ("no matching rule").
+rules:
+  - name: "AWS business infra"
+    classification: BUSINESS
+    reason: "クラウド基盤費は事業用"
+    business_ratio: null
+    match:
+      description_keywords: ["AWS", "Amazon Web Services"]
+      institutions: []
+
+  - name: "GitHub business tool"
+    classification: BUSINESS
+    reason: "開発ツールは事業用"
+    business_ratio: null
+    match:
+      description_keywords: ["GitHub", "GITHUB"]
+
+  - name: "telecom prorated"
+    classification: PRORATED
+    reason: "通信費は事業30%で按分"
+    business_ratio: 0.3
+    match:
+      description_keywords: ["携帯", "スマホ", "通信"]
+      major_category: ["通信費"]
+
+  - name: "utilities prorated"
+    classification: PRORATED
+    reason: "水道・光熱費は事業20%で按分"
+    business_ratio: 0.2
+    match:
+      description_keywords: ["電力", "ガス", "水道"]
+      major_category: ["水道・光熱費"]
+
+  - name: "personal memo"
+    classification: PERSONAL
+    reason: "メモ指定により私用"
+    match:
+      description_regex: "私用|personal"
+
+  - name: "cafe personal"
+    classification: PERSONAL
+    reason: "カフェ利用は私用"
+    match:
+      description_keywords:
+        - "スターバックス"
+        - "ドトール"
+        - "タリーズ"
+        - "カフェ"
+
+  - name: "ATOK review"
+    classification: REVIEW
+    reason: "ATOK契約は要確認"
+    match:
+      description_keywords: ["ATOK"]
+
+  - name: "Remember The Milk review"
+    classification: REVIEW
+    reason: "タスク管理サービスは要確認"
+    match:
+      description_keywords: ["Remember The Milk", "RTM"]
+
+  - name: "amazon business supplies"
+    classification: BUSINESS
+    reason: "Amazon備品は事業用"
+    match:
+      description_keywords: ["AMAZON", "アマゾン", "AMZN"]
+      amazon_item_keywords: ["プリンタ用紙", "文具セット"]

@@ -72,3 +72,13 @@ tracks/
 
 # Manual account configuration (contains sensitive info)
 accounts.yaml
+
+# Card statement classification (local only, never commit)
+.audit/
+card_rules.yaml
+decisions.json
+reports/
+*.orders.csv
+amazon_orders*.csv
+receipts/
+data/

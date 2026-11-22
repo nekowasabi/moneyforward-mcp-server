@@ -6,7 +6,7 @@ and snapshot functionality.
 
 import asyncio
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -131,7 +131,7 @@ async def test_save_snapshot(cache_manager):
     snapshot_data = {
         "total_assets_jpy": 5000000,
         "daily_change_jpy": 12000,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
     # Save snapshot

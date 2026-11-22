@@ -6,11 +6,13 @@ data through FastMCP tools with caching and browser automation.
 
 import logging
 import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import structlog
-import yaml
+import yaml  # type: ignore[import-untyped]
 from fastmcp import FastMCP
 
 from src.browser.auth import AuthManager
@@ -24,7 +26,7 @@ from src.config import settings
 def configure_logging() -> None:
     """Configure structlog for JSON or console output."""
     if settings.log_format == "json":
-        processors = [
+        processors: list[Any] = [
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.add_log_level,
             structlog.processors.StackInfoRenderer(),
@@ -60,11 +62,11 @@ browser_manager: BrowserManager | None = None
 auth_manager: AuthManager | None = None
 scraper: MoneyForwardScraper | None = None
 cache_manager: CacheManager | None = None
-selectors: dict | None = None
+selectors: dict[str, Any] | None = None
 
 
 @asynccontextmanager
-async def lifespan(server):
+async def lifespan(server: FastMCP) -> AsyncIterator[None]:
     """Manage server startup and shutdown."""
     global browser_manager, auth_manager, scraper, cache_manager, selectors
 
@@ -151,7 +153,7 @@ mcp = FastMCP("MoneyForward MCP Server", lifespan=lifespan)
 
 # Tool: Get Total Assets
 @mcp.tool()
-async def get_total_assets() -> dict:
+async def get_total_assets() -> dict[str, Any]:
     """Get current total assets and daily change from MoneyForward ME.
 
     Retrieves the total assets amount and daily change with caching support.
@@ -183,7 +185,7 @@ async def get_total_assets() -> dict:
 
 # Tool: List Recent Transactions
 @mcp.tool()
-async def list_recent_transactions(count: int = 20) -> dict:
+async def list_recent_transactions(count: int = 20) -> dict[str, Any]:
     """List recent transactions from MoneyForward ME.
 
     Retrieves recent transactions with optional limit. Results are cached.
@@ -216,7 +218,7 @@ async def list_recent_transactions(count: int = 20) -> dict:
 
 # Tool: Get Budget Status
 @mcp.tool()
-async def get_budget_status() -> dict:
+async def get_budget_status() -> dict[str, Any]:
     """Get current month's budget status from MoneyForward ME.
 
     Retrieves budget information including total, spent, and remaining amounts
@@ -247,7 +249,7 @@ async def get_budget_status() -> dict:
 
 # Tool: Trigger Account Refresh
 @mcp.tool()
-async def trigger_refresh() -> dict:
+async def trigger_refresh() -> dict[str, Any]:
     """Trigger account refresh on MoneyForward ME.
 
     Initiates a refresh of all linked accounts. This is a real-time operation
@@ -275,7 +277,7 @@ async def trigger_refresh() -> dict:
 
 # Tool: Health Check
 @mcp.tool()
-async def health_check() -> dict:
+async def health_check() -> dict[str, Any]:
     """Check health of MCP server components.
 
     Verifies the status of browser, authentication session, and cache database.
@@ -304,7 +306,7 @@ async def health_check() -> dict:
 
 # Tool: List Manual Accounts
 @mcp.tool()
-async def list_manual_accounts() -> dict:
+async def list_manual_accounts() -> dict[str, Any]:
     """List manual accounts configured for foreign currency management.
 
     Reads account configurations from accounts.yaml. These are manually
@@ -330,7 +332,7 @@ async def list_manual_accounts() -> dict:
 
 # Tool: Update Manual Account
 @mcp.tool()
-async def update_manual_account(account_name: str, amount: float) -> dict:
+async def update_manual_account(account_name: str, amount: float) -> dict[str, Any]:
     """Update a manual account balance with foreign currency to JPY conversion.
 
     Converts the specified foreign currency amount to JPY using a live exchange rate,
@@ -366,9 +368,98 @@ async def update_manual_account(account_name: str, amount: float) -> dict:
     return await update_account_impl(scraper, account_name, amount)
 
 
+# Tool: List Financial Institutions
+@mcp.tool()
+async def list_financial_institutions() -> dict[str, Any]:
+    """List 保有金融機関 from MoneyForward accounts page."""
+    from src.tools.statements import (
+        list_financial_institutions as list_institutions_impl,
+    )
+
+    if not scraper or not cache_manager:
+        logger.error("server_not_initialized")
+        return {
+            "status": "error",
+            "error": {"message": "Server not initialized", "type": "INITIALIZATION_ERROR"},
+        }
+
+    return await list_institutions_impl(scraper, cache_manager)
+
+
+# Tool: List Monthly Transactions
+@mcp.tool()
+async def list_monthly_transactions(
+    year: int, month: int, institution: str | None = None
+) -> dict[str, Any]:
+    """List monthly transactions, optionally filtered by institution."""
+    from src.tools.statements import (
+        list_monthly_transactions as list_monthly_impl,
+    )
+
+    if not scraper or not cache_manager:
+        logger.error("server_not_initialized")
+        return {
+            "status": "error",
+            "error": {"message": "Server not initialized", "type": "INITIALIZATION_ERROR"},
+        }
+
+    return await list_monthly_impl(scraper, cache_manager, year, month, institution)
+
+
+# Tool: Classify Card Statement
+@mcp.tool()
+async def classify_card_statement(
+    year: int,
+    month: int,
+    institution: str | None = None,
+    amazon_csv_path: str | None = None,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    """Classify card statement lines into BUSINESS/PERSONAL/PRORATED/REVIEW."""
+    from src.tools.statements import classify_card_statement as classify_impl
+
+    if not scraper or not cache_manager:
+        logger.error("server_not_initialized")
+        return {
+            "status": "error",
+            "error": {"message": "Server not initialized", "type": "INITIALIZATION_ERROR"},
+        }
+
+    return await classify_impl(
+        scraper, cache_manager, year, month, institution, amazon_csv_path, write_report
+    )
+
+
+# Tool: Record Classification Decision
+@mcp.tool()
+async def record_classification_decision(
+    description: str,
+    classification: str,
+    reason: str,
+    business_ratio: float | None = None,
+) -> dict[str, Any]:
+    """Record a human classification decision for future months."""
+    from src.tools.statements import (
+        record_classification_decision as record_impl,
+    )
+
+    return await record_impl(description, classification, reason, business_ratio)
+
+
+# Tool: List Classification Decisions
+@mcp.tool()
+async def list_classification_decisions() -> dict[str, Any]:
+    """List all human classification decisions."""
+    from src.tools.statements import (
+        list_classification_decisions as list_decisions_impl,
+    )
+
+    return await list_decisions_impl()
+
+
 # HTTP health endpoint (for Docker healthcheck)
-@mcp.custom_route("/health", methods=["GET"])
-async def http_health(request) -> dict:
+@mcp.custom_route("/health", methods=["GET"])  # type: ignore[arg-type]
+async def http_health(request: Any) -> dict[str, Any]:
     """HTTP endpoint for Docker healthcheck.
 
     Returns:
