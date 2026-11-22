@@ -47,6 +47,7 @@ def _transaction_from_dict(data: dict[str, Any]) -> Transaction:
         memo=str(data.get("memo", data.get("メモ", ""))),
         is_transfer=bool(data.get("is_transfer", False)),
         mf_id=str(data.get("mf_id", data.get("ID", ""))),
+        calc_target=str(data.get("calc_target", data.get("計算対象", ""))),
     )
 
 

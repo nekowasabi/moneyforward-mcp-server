@@ -130,7 +130,7 @@ def review_rows(
             continue
         txn = row.transaction
         is_amazon = is_amazon_description(txn.description)
-        unique_title: str | None = None
+        unique_titles: tuple[str, ...] | None = None
         if is_amazon:
             candidates = (
                 match_amazon_orders(
@@ -142,12 +142,16 @@ def review_rows(
             # Also honour an already-matched order id on the row when orders
             # are not passed (e.g. classify_month ran with orders already).
             if len(candidates) == 1:
-                unique_title = candidates[0].title
+                unique_titles = (
+                    tuple(candidates[0].titles)
+                    if candidates[0].titles
+                    else ((candidates[0].title,) if candidates[0].title else ())
+                )
             elif getattr(row, "amazon_order_id", None) and getattr(row, "decision_key", None):
                 # Row was matched during classify; title unknown here, so we
                 # cannot safely record without the title list.
-                unique_title = None
-            if unique_title is None and not merchant_wide:
+                unique_titles = None
+            if unique_titles is None and not merchant_wide:
                 print_fn(
                     "Amazon明細は注文の一意な一致がないため、決定を記憶できません。"
                     "この場限りの分類として扱います。"
@@ -223,9 +227,15 @@ def review_rows(
         if not reason:
             reason = "human review"
         try:
-            if is_amazon and unique_title is not None:
+            if is_amazon and unique_titles is not None:
                 target.record(
-                    txn.description, answer, reason, ratio, amazon_item_title=unique_title
+                    txn.description,
+                    answer,
+                    reason,
+                    ratio,
+                    amazon_item_title=list(unique_titles)
+                    if len(unique_titles) != 1
+                    else unique_titles[0],
                 )
             elif is_amazon and merchant_wide:
                 target.record(txn.description, answer, reason, ratio, merchant_wide=True)

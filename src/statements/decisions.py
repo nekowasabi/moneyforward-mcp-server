@@ -99,17 +99,32 @@ class DecisionStore:
         classification: str,
         reason: str,
         business_ratio: float | None = None,
-        amazon_item_title: str | None = None,
+        amazon_item_title: str | list[str] | tuple[str, ...] | None = None,
         merchant_wide: bool = False,
     ) -> str:
         """Record a decision; returns the normalized key.
 
         For Amazon-looking descriptions, an amazon_item_title is required and
         the key is ``amazon:<normalized title>`` — unless merchant_wide=True,
-        which explicitly stores a merchant-level decision.
+        which explicitly stores a merchant-level decision. Pass a list/tuple
+        of titles for a grouped multi-item order; the key is then
+        ``amazon:<sorted normalized titles joined with " | ">``.
         """
         self._ensure_loaded()
         if amazon_item_title is not None:
+            if isinstance(amazon_item_title, (list, tuple)):
+                from src.statements.amazon import group_decision_key
+
+                key = group_decision_key(tuple(amazon_item_title))
+                self._data[key] = {
+                    "description": " | ".join(list(amazon_item_title)),
+                    "classification": classification,
+                    "reason": reason,
+                    "business_ratio": business_ratio,
+                    "amazon_item_titles": list(amazon_item_title),
+                }
+                self._save()
+                return key
             key = amazon_decision_key(amazon_item_title)
             self._data[key] = {
                 "description": amazon_item_title,

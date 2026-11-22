@@ -51,6 +51,21 @@ class AmazonOrder:
     title: str
 
 
+@dataclass(frozen=True)
+class GroupedAmazonOrder:
+    """One Amazon order (one or more item rows sharing an order id)."""
+
+    order_date: date | None
+    order_id: str
+    total: int | None
+    titles: tuple[str, ...] = ()
+
+    @property
+    def title(self) -> str:
+        """Joined item titles (compat with single-row use)."""
+        return " ".join(self.titles)
+
+
 def is_amazon_description(description: str) -> bool:
     """Check whether a statement description looks like Amazon.
 
@@ -193,24 +208,83 @@ def load_amazon_orders(
         return orders
 
 
+def group_orders_by_id(orders: list[AmazonOrder]) -> list[GroupedAmazonOrder]:
+    """Group item rows by order id into logical orders.
+
+    Order total: when all non-null row totals in a group are equal, that value
+    is the order-level total; otherwise the sum of item totals. Rows without
+    an order id each form their own group. Titles: all item titles of the group.
+    """
+    groups: dict[str, list[AmazonOrder]] = {}
+    order: list[str] = []
+    singles: list[AmazonOrder] = []
+    for o in orders:
+        if not o.order_id:
+            singles.append(o)
+            continue
+        if o.order_id not in groups:
+            groups[o.order_id] = []
+            order.append(o.order_id)
+        groups[o.order_id].append(o)
+    grouped: list[GroupedAmazonOrder] = []
+    for oid in order:
+        rows = groups[oid]
+        totals = [r.total for r in rows if r.total is not None]
+        total: int | None
+        if not totals:
+            total = None
+        elif len(set(totals)) == 1:
+            total = totals[0]
+        else:
+            total = sum(totals)
+        dates = [r.order_date for r in rows if r.order_date is not None]
+        # Earliest date is representative for window matching.
+        odt = min(dates) if dates else None
+        titles = tuple(r.title for r in rows if r.title)
+        grouped.append(GroupedAmazonOrder(order_date=odt, order_id=oid, total=total, titles=titles))
+    for o in singles:
+        titles = (o.title,) if o.title else ()
+        grouped.append(
+            GroupedAmazonOrder(
+                order_date=o.order_date, order_id=o.order_id, total=o.total, titles=titles
+            )
+        )
+    return grouped
+
+
+def group_decision_key(titles: tuple[str, ...] | list[str]) -> str:
+    """Decision key for a grouped order: sorted normalized titles joined with ' | '."""
+    from src.statements.decisions import normalize_description
+
+    parts = sorted({normalize_description(t) for t in titles if normalize_description(t)})
+    return f"amazon:{' | '.join(parts)}"
+
+
 def match_amazon_orders(
     description: str,
     amount: int,
     txn_date: date,
-    orders: list[AmazonOrder],
+    orders: list[AmazonOrder] | list[GroupedAmazonOrder],
     window_days: int = 3,
-) -> list[AmazonOrder]:
+) -> list[GroupedAmazonOrder]:
     """Find Amazon orders matching amount + date window.
 
+    Amounts compare by absolute value (MF expenses are negative, Amazon totals
+    are positive). Item rows sharing an order id are grouped first: the order
+    total is the order-level total when present, else the sum of item prices.
     Only called for Amazon-like descriptions; returns possibly empty list.
     """
     if not is_amazon_description(description):
         return []
     if not orders:
         return []
-    matched: list[AmazonOrder] = []
-    for o in orders:
-        if o.total is not None and o.total != amount:
+    if orders and isinstance(orders[0], GroupedAmazonOrder):
+        grouped = [o for o in orders if isinstance(o, GroupedAmazonOrder)]
+    else:
+        grouped = group_orders_by_id([o for o in orders if isinstance(o, AmazonOrder)])
+    matched: list[GroupedAmazonOrder] = []
+    for o in grouped:
+        if o.total is not None and abs(o.total) != abs(amount):
             continue
         if o.total is None:
             # Without amount we cannot confidently match; skip
@@ -228,7 +302,7 @@ def amazon_match_summary(
     description: str,
     amount: int,
     txn_date: date,
-    orders: list[AmazonOrder],
+    orders: list[AmazonOrder] | list[GroupedAmazonOrder],
     window_days: int = 3,
 ) -> dict[str, Any]:
     """Summarize Amazon matching outcome for pipeline/report use."""

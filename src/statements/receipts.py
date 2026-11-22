@@ -279,7 +279,7 @@ def find_matching_receipt(
             continue
         if abs((txn_date - r.receipt_date).days) > window_days:
             continue
-        if r.amount is not None and r.amount != amount:
+        if r.amount is not None and abs(r.amount) != abs(amount):
             continue
         # Prefer amount-bearing matches, then closest date
         if best is None:

@@ -740,3 +740,193 @@ def test_decision_key_in_csv_md(tmp_path):
     md = md_path.read_text(encoding="utf-8")
     assert "shop-a" in md
     assert "判定キー" in md
+
+
+# --- FIX2 round 2 ---
+
+
+def test_fix2_negative_mf_matches_positive_amazon(tmp_path):
+    from src.statements.amazon import AmazonOrder
+
+    orders = [AmazonOrder(date(2026, 10, 4), "ORDER-1", 1980, "プリンタ用紙 A4")]
+    example = Path("card_rules.yaml.example")
+    rules = load_rules(example)
+    txn = Transaction(
+        date=date(2026, 10, 5),
+        description="AMAZON.CO.JP",
+        amount=-1980,
+        institution="Example Card",
+    )
+    rows = classify_month([txn], rules, None, orders, None)
+    assert len(rows) == 1
+    assert rows[0].result.classification == Classification.BUSINESS
+    assert rows[0].amazon_order_id == "ORDER-1"
+
+
+def test_fix2_negative_mf_matches_positive_receipt():
+    from src.statements.receipts import ReceiptInfo
+
+    class FakeSource:
+        def list_receipts(self, year: int, month: int) -> list:
+            if (year, month) == (2026, 10):
+                return [ReceiptInfo("20261005_ExampleVendor_1980.pdf", date(2026, 10, 5), 1980)]
+            return []
+
+    found = find_matching_receipt(date(2026, 10, 5), -1980, FakeSource(), 3)
+    assert found is not None
+    assert found.amount == 1980
+
+
+def test_fix2_cli_classify_negative_amazon_end_to_end(tmp_path):
+    from src.statements.cli import main
+
+    stmt = tmp_path / "stmt.csv"
+    stmt.write_text(
+        "計算対象,日付,内容,金額（円）,保有金融機関,大項目,中項目,メモ,振替,ID\n"
+        "対象,2026/10/05,AMAZON.CO.JP,-1980,Example Card,,,,\n",
+        encoding="utf-8",
+    )
+    amz = tmp_path / "amz.csv"
+    _write_csv(
+        amz,
+        ["注文日", "注文番号", "合計", "商品名"],
+        [["2026/10/04", "ORDER-9", "1980", "プリンタ用紙 A4"]],
+    )
+    outdir = tmp_path / "reports"
+    rc = main(
+        [
+            "classify",
+            "--month",
+            "2026-10",
+            "--statement-csv",
+            str(stmt),
+            "--rules",
+            "card_rules.yaml.example",
+            "--decisions",
+            str(tmp_path / "dec.json"),
+            "--amazon-csv",
+            str(amz),
+            "--output-dir",
+            str(outdir),
+            "--format",
+            "csv",
+        ]
+    )
+    assert rc == 0
+    content = (outdir / "2026-10.csv").read_text(encoding="utf-8-sig")
+    assert "BUSINESS" in content
+    assert "1980" in content
+
+
+def test_fix2_group_two_item_order():
+    from src.statements.amazon import AmazonOrder, group_decision_key, group_orders_by_id
+
+    orders = [
+        AmazonOrder(date(2026, 10, 4), "ORDER-G", 1000, "プリンタ用紙 A4"),
+        AmazonOrder(date(2026, 10, 4), "ORDER-G", 980, "文具セット"),
+    ]
+    grouped = group_orders_by_id(orders)
+    assert len(grouped) == 1
+    assert grouped[0].total == 1980
+    assert set(grouped[0].titles) == {"プリンタ用紙 A4", "文具セット"}
+    # Order-level total repeated: use it, not the sum.
+    orders2 = [
+        AmazonOrder(date(2026, 10, 4), "ORDER-H", 1980, "プリンタ用紙 A4"),
+        AmazonOrder(date(2026, 10, 4), "ORDER-H", 1980, "文具セット"),
+    ]
+    grouped2 = group_orders_by_id(orders2)
+    assert grouped2[0].total == 1980
+    # Matching by summed total with negative MF amount.
+    txn = Transaction(
+        date=date(2026, 10, 5),
+        description="AMAZON.CO.JP",
+        amount=-1980,
+        institution="Example Card",
+    )
+    m = match_amazon_orders("AMAZON.CO.JP", -1980, date(2026, 10, 5), orders, 3)
+    assert len(m) == 1
+    assert m[0].order_id == "ORDER-G"
+    # Decision key: sorted normalized titles joined with " | ".
+    key = group_decision_key(tuple(grouped[0].titles))
+    assert key.startswith("amazon:")
+    assert " | " in key
+    # Rule matching sees both titles.
+    example = Path("card_rules.yaml.example")
+    rules = load_rules(example)
+    rows = classify_month([txn], rules, None, orders, None)
+    assert rows[0].result.classification == Classification.BUSINESS
+    assert rows[0].decision_key == key
+
+
+def test_fix2_report_abs_and_income_and_excluded(tmp_path):
+    # abs business amounts for negative expenses
+    row = ClassifiedRow(
+        transaction=_txn("Shop A", -1980),
+        result=ClassificationResult(Classification.BUSINESS, "biz"),
+        receipt_status="missing",
+    )
+    d = row.to_dict()
+    assert d["amount"] == -1980  # raw signed kept
+    assert d["business_amount"] == 1980
+    pror = ClassifiedRow(
+        transaction=_txn("Shop B", -1000),
+        result=ClassificationResult(Classification.PRORATED, "split", 0.3),
+        receipt_status="missing",
+    )
+    assert pror.to_dict()["business_amount"] == 300
+    s = summarize([row, pror])
+    assert s["totals_by_classification"]["BUSINESS"] == 1980
+    assert s["totals_by_classification"]["PRORATED"] == 1000
+    assert s["business_amount_total"] == 2280
+    # positive income -> REVIEW 入金・返金 when no rule/decision
+    rows = classify_month([_txn("Refund Mystery", 500)], [], None, [], None)
+    assert rows[0].result.classification == Classification.REVIEW
+    assert rows[0].result.reason == "入金・返金"
+    # decision overrides income fallback
+    dec_path = tmp_path / "dec.json"
+    store = DecisionStore(dec_path)
+    store.record("Refund Mystery", "PERSONAL", "human says personal", None)
+    rows2 = classify_month([_txn("Refund Mystery", 500)], [], store, [], None)
+    assert rows2[0].result.classification == Classification.PERSONAL
+    # rule overrides income fallback
+    rules = [
+        Rule(
+            name="income-biz",
+            classification=Classification.BUSINESS,
+            reason="biz",
+            description_keywords=("Refund Mystery",),
+        )
+    ]
+    rows3 = classify_month([_txn("Refund Mystery", 500)], rules, None, [], None)
+    assert rows3[0].result.classification == Classification.BUSINESS
+    # excluded: transfer and 計算対象外
+    t_transfer = Transaction(
+        date=date(2026, 10, 5),
+        description="Transfer Row",
+        amount=-1000,
+        is_transfer=True,
+        calc_target="対象",
+    )
+    t_calc = Transaction(
+        date=date(2026, 10, 5),
+        description="Calc Out",
+        amount=-1000,
+        calc_target="対象外",
+    )
+    t_zero = Transaction(
+        date=date(2026, 10, 5),
+        description="Zero Calc",
+        amount=-1000,
+        calc_target="0",
+    )
+    rows4 = classify_month([t_transfer, t_calc, t_zero, _txn("Shop A", -1980)], [], None, [], None)
+    assert rows4[0].extra.get("excluded") is True
+    assert rows4[1].extra.get("excluded") is True
+    assert rows4[2].extra.get("excluded") is True
+    assert "対象外" in rows4[0].result.reason
+    s4 = summarize(rows4)
+    assert s4["excluded_count"] == 3
+    assert s4["count"] == 1
+    md = write_markdown(rows4, 2026, 10, tmp_path / "r.md")
+    text = Path(md).read_text(encoding="utf-8")
+    assert "対象外" in text

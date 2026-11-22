@@ -6,10 +6,12 @@ import structlog
 
 from src.statements.amazon import (
     AmazonOrder,
+    GroupedAmazonOrder,
+    group_decision_key,
     is_amazon_description,
     match_amazon_orders,
 )
-from src.statements.decisions import DecisionStore, amazon_decision_key, normalize_description
+from src.statements.decisions import DecisionStore, normalize_description
 from src.statements.models import (
     Classification,
     ClassificationResult,
@@ -20,6 +22,9 @@ from src.statements.receipts import ReceiptSource, find_matching_receipt
 from src.statements.rules import Rule, apply_rules
 
 logger = structlog.get_logger(__name__)
+
+EXCLUDED_REASON = "対象外（振替・計算対象外）"
+INCOME_REASON = "入金・返金"
 
 
 class NullReceiptSource:
@@ -65,29 +70,80 @@ def _decision_result(hit: dict[str, Any]) -> ClassificationResult:
     )
 
 
+def _lookup_grouped_decision(
+    decisions: DecisionStore | None, titles: tuple[str, ...] | list[str]
+) -> dict[str, Any] | None:
+    if decisions is None:
+        return None
+    key = group_decision_key(tuple(titles))
+    data = decisions.list()
+    hit = data.get(key)
+    if hit is not None:
+        return hit
+    # Backward compat: single-title groups were stored via amazon:<norm title>.
+    # group_decision_key for a single title is identical, so this only helps
+    # when titles contain one entry with odd spacing.
+    return None
+
+
+def _income_review() -> ClassificationResult:
+    return ClassificationResult(
+        classification=Classification.REVIEW,
+        reason=INCOME_REASON,
+        business_ratio=None,
+        source="default",
+    )
+
+
 def classify_month(
     transactions: list[Transaction],
     rules: list[Rule],
     decisions: DecisionStore | None = None,
-    amazon_orders: list[AmazonOrder] | None = None,
+    amazon_orders: list[AmazonOrder] | list[GroupedAmazonOrder] | None = None,
     receipt_source: ReceiptSource | None = None,
     amazon_window_days: int = 3,
     receipt_window_days: int = 3,
 ) -> list[ClassifiedRow]:
     """Classify a month of transactions.
 
-    Order: decision > amazon+rules > rules > REVIEW.
+    Order: excluded > decision > amazon+rules > rules > REVIEW.
 
-    For Amazon-looking descriptions the Amazon order match runs first.
-    A unique match uses ``amazon:<normalized item title>`` as the decision key;
-    merchant-level decisions are ignored for Amazon lines.
-    Without a unique match, Amazon lines stay REVIEW unless a plain rule decides.
+    Excluded (transfer / 計算対象外) rows are not classified and carry
+    extra["excluded"]=True with reason 対象外. Positive amounts (income/refunds)
+    fall back to REVIEW 入金・返金 when no decision/rule decides.
+
+    For Amazon-looking descriptions the order match runs first. Item rows
+    sharing an order id are grouped: matching uses the order total (order-level
+    total when present, else the sum of item prices) and all item titles feed
+    rule matching; the decision key is the sorted, normalized titles joined
+    with " | ". Without a unique match, Amazon lines stay REVIEW unless a
+    plain rule or merchant-wide decision applies.
     """
     orders = amazon_orders or []
     rows: list[ClassifiedRow] = []
     for txn in transactions:
+        # --- Excluded: transfers and non-calc-target rows ---
+        if txn.is_excluded:
+            rows.append(
+                ClassifiedRow(
+                    transaction=txn,
+                    result=ClassificationResult(
+                        classification=Classification.REVIEW,
+                        reason=EXCLUDED_REASON,
+                        business_ratio=None,
+                        source="default",
+                    ),
+                    amazon_order_id=None,
+                    receipt_file=None,
+                    receipt_status="not_required",
+                    decision_key=None,
+                    extra={"excluded": True},
+                )
+            )
+            continue
+
         is_amazon = is_amazon_description(txn.description)
-        matches: list[AmazonOrder] = []
+        matches: list[GroupedAmazonOrder] = []
         if is_amazon and orders:
             matches = match_amazon_orders(
                 txn.description, txn.amount, txn.date, orders, amazon_window_days
@@ -96,11 +152,11 @@ def classify_month(
         # --- Amazon branch: unique match may hit an item-level decision ---
         if is_amazon:
             if len(matches) == 1:
-                title = matches[0].title
-                order_id = matches[0].order_id
-                dkey = amazon_decision_key(title)
+                group = matches[0]
+                titles = tuple(group.titles) if group.titles else (group.title,)
+                dkey = group_decision_key(titles)
                 if decisions is not None:
-                    hit = decisions.lookup(txn.description, amazon_item_title=title)
+                    hit = _lookup_grouped_decision(decisions, titles)
                     if hit is not None:
                         result = _decision_result(hit)
                         receipt_file = _find_receipt_file(txn, receipt_source, receipt_window_days)
@@ -108,7 +164,7 @@ def classify_month(
                             ClassifiedRow(
                                 transaction=txn,
                                 result=result,
-                                amazon_order_id=order_id,
+                                amazon_order_id=group.order_id,
                                 receipt_file=receipt_file,
                                 receipt_status=_receipt_status_for(
                                     result.classification, receipt_file
@@ -126,7 +182,7 @@ def classify_month(
                             ClassifiedRow(
                                 transaction=txn,
                                 result=result,
-                                amazon_order_id=order_id,
+                                amazon_order_id=group.order_id,
                                 receipt_file=receipt_file,
                                 receipt_status=_receipt_status_for(
                                     result.classification, receipt_file
@@ -135,8 +191,8 @@ def classify_month(
                             )
                         )
                         continue
-                # amazon + rules
-                amazon_titles = (title,)
+                # amazon + rules (all item titles feed rule matching)
+                amazon_titles = titles
                 rule_result = apply_rules(txn, rules, amazon_titles)
                 if rule_result.classification != Classification.REVIEW:
                     result = ClassificationResult(
@@ -145,6 +201,8 @@ def classify_month(
                         business_ratio=rule_result.business_ratio,
                         source="amazon",
                     )
+                elif txn.amount > 0:
+                    result = _income_review()
                 else:
                     result = ClassificationResult(
                         classification=Classification.REVIEW,
@@ -157,7 +215,7 @@ def classify_month(
                     ClassifiedRow(
                         transaction=txn,
                         result=result,
-                        amazon_order_id=order_id,
+                        amazon_order_id=group.order_id,
                         receipt_file=receipt_file,
                         receipt_status=_receipt_status_for(result.classification, receipt_file),
                         decision_key=dkey,
@@ -225,6 +283,8 @@ def classify_month(
             plain = apply_rules(txn, rules, ())
             if plain.classification != Classification.REVIEW:
                 result = plain
+            elif txn.amount > 0:
+                result = _income_review()
             else:
                 # Keep the amazon-specific reason when no rule decides.
                 if orders:
@@ -276,6 +336,8 @@ def classify_month(
         rule_result = apply_rules(txn, rules, ())
         if rule_result.classification != Classification.REVIEW:
             result = rule_result
+        elif txn.amount > 0:
+            result = _income_review()
         else:
             result = ClassificationResult(
                 classification=Classification.REVIEW,

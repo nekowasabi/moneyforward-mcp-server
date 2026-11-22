@@ -30,6 +30,14 @@ class Transaction:
     memo: str = ""
     is_transfer: bool = False
     mf_id: str = ""
+    calc_target: str = ""
+
+    @property
+    def is_excluded(self) -> bool:
+        """Transfer or non-calc-target rows are excluded from classification."""
+        if self.is_transfer:
+            return True
+        return self.calc_target.strip() in ("0", "対象外")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to plain dict."""
@@ -66,6 +74,7 @@ class Transaction:
             memo=str(data.get("memo", "")),
             is_transfer=bool(data.get("is_transfer", False)),
             mf_id=str(data.get("mf_id", "")),
+            calc_target=str(data.get("calc_target", data.get("計算対象", ""))),
         )
 
 
@@ -79,11 +88,11 @@ class ClassificationResult:
     source: ClassificationSource = "default"
 
     def business_amount(self, amount: int) -> int:
-        """Compute business-portion amount (rounded to int yen)."""
+        """Compute business-portion amount (positive spend, abs for expenses)."""
         if self.classification == Classification.BUSINESS:
-            return amount
+            return abs(amount)
         if self.classification == Classification.PRORATED and self.business_ratio is not None:
-            return int(round(amount * self.business_ratio))
+            return int(round(abs(amount) * self.business_ratio))
         return 0
 
 

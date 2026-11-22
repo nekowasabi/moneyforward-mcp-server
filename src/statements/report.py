@@ -29,14 +29,31 @@ def default_report_dir() -> Path:
     return Path(raw).expanduser()
 
 
+def is_excluded_row(r: ClassifiedRow) -> bool:
+    """Check whether a row was excluded (transfer / non-calc-target)."""
+    try:
+        return bool(r.extra.get("excluded"))
+    except AttributeError:
+        return False
+
+
 def summarize(rows: list[ClassifiedRow]) -> dict[str, Any]:
-    """Build summary totals per classification."""
+    """Build summary totals per classification.
+
+    Amounts are shown as positive spend (abs); the raw signed amount stays in
+    the row itself. Excluded rows (対象外) are counted separately and do not
+    contribute to classification totals.
+    """
     totals: dict[str, int] = {c.value: 0 for c in Classification}
     business_total = 0
     review_count = 0
     missing_receipts = 0
+    excluded_count = 0
     for r in rows:
-        totals[r.result.classification.value] += r.transaction.amount
+        if is_excluded_row(r):
+            excluded_count += 1
+            continue
+        totals[r.result.classification.value] += abs(r.transaction.amount)
         business_total += r.result.business_amount(r.transaction.amount)
         if r.result.classification == Classification.REVIEW:
             review_count += 1
@@ -50,11 +67,13 @@ def summarize(rows: list[ClassifiedRow]) -> dict[str, Any]:
         ):
             missing_receipts += 1
     return {
-        "count": len(rows),
+        "count": len([r for r in rows if not is_excluded_row(r)]),
         "totals_by_classification": totals,
         "business_amount_total": business_total,
         "review_count": review_count,
         "missing_receipts": missing_receipts,
+        "excluded_count": excluded_count,
+        "total_rows": len(rows),
     }
 
 
@@ -86,6 +105,7 @@ def render_markdown(rows: list[ClassifiedRow], year: int, month: int) -> str:
     lines.append(f"- 事業按分合計: {summary['business_amount_total']}円")
     lines.append(f"- 要確認 (REVIEW): {summary['review_count']}件")
     lines.append(f"- 領収書不足: {summary['missing_receipts']}件")
+    lines.append(f"- 対象外: {summary.get('excluded_count', 0)}件")
     lines.append("")
     lines.append("## 明細")
     lines.append("")
@@ -94,6 +114,8 @@ def render_markdown(rows: list[ClassifiedRow], year: int, month: int) -> str:
     )
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for r in rows:
+        if is_excluded_row(r):
+            continue
         d = r.to_dict()
         lines.append(
             "| {date} | {description} | {institution} | {amount} | "
@@ -102,6 +124,24 @@ def render_markdown(rows: list[ClassifiedRow], year: int, month: int) -> str:
                 **{k: str(d.get(k, "")) for k in CSV_HEADERS}
             )
         )
+    excluded = [r for r in rows if is_excluded_row(r)]
+    if excluded:
+        lines.append("")
+        lines.append("## 対象外")
+        lines.append("")
+        lines.append(
+            "| 日付 | 内容 | 金融機関 | 金額 | 分類 | 比率 | 事業額 | 理由 | Amazon注文 | 領収書 | 状態 | 判定キー |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        for r in excluded:
+            d = r.to_dict()
+            lines.append(
+                "| {date} | {description} | {institution} | {amount} | "
+                "{classification} | {business_ratio} | {business_amount} | "
+                "{reason} | {amazon_order_id} | {receipt_file} | {receipt_status} | {decision_key} |".format(
+                    **{k: str(d.get(k, "")) for k in CSV_HEADERS}
+                )
+            )
     lines.append("")
     return "\n".join(lines)
 
