@@ -8,7 +8,7 @@ securely using Pydantic's SecretStr type.
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -24,9 +24,7 @@ class Settings(BaseSettings):
     # MoneyForward Authentication
     mf_email: str = Field(..., description="MoneyForward login email address")
     mf_password: SecretStr = Field(..., description="MoneyForward login password")
-    mf_totp_secret: SecretStr = Field(
-        default=SecretStr(""), description="Unused legacy field"
-    )
+    mf_totp_secret: SecretStr = Field(default=SecretStr(""), description="Unused legacy field")
 
     # MCP Server Configuration
     mcp_host: str = Field(default="0.0.0.0", description="MCP server host to bind to")
@@ -51,18 +49,14 @@ class Settings(BaseSettings):
         default="/app/browser-context",
         description="Directory for Playwright persistent context (cookies/sessions)",
     )
-    browser_headless: bool = Field(
-        default=True, description="Run browser in headless mode"
-    )
+    browser_headless: bool = Field(default=True, description="Run browser in headless mode")
 
     # Logging Configuration
     log_level: str = Field(
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
     )
-    log_format: str = Field(
-        default="json", description="Log output format (json or console)"
-    )
+    log_format: str = Field(default="json", description="Log output format (json or console)")
 
     # Account Configuration
     accounts_config_path: str = Field(
@@ -74,6 +68,36 @@ class Settings(BaseSettings):
     selectors_path: str = Field(
         default="src/selectors.yaml",
         description="Path to CSS selectors YAML configuration file",
+    )
+
+    # Card statement classification
+    card_rules_path: str = Field(
+        default="~/.config/moneyforward-mcp/card_rules.yaml",
+        description="Path to card classification rules YAML file",
+    )
+    card_decisions_path: str = Field(
+        default="~/.config/moneyforward-mcp/decisions.json",
+        description="Path to human decision JSON store",
+    )
+    amazon_orders_csv: str | None = Field(
+        default=None,
+        description="Default path to Amazon order history CSV",
+    )
+    receipts_root: str | None = Field(
+        default=None,
+        description="Root dir for synced receipts (Google Drive for desktop)",
+    )
+    google_drive_access_token: SecretStr | None = Field(
+        default=None,
+        description="OAuth access token for Google Drive API v3",
+    )
+    google_drive_root_folder_id: str | None = Field(
+        default=None,
+        description="Optional Drive folder id for receipt search root",
+    )
+    card_report_dir: str = Field(
+        default="~/.local/share/moneyforward-mcp/reports",
+        description="Output dir for card statement reports",
     )
 
     model_config = SettingsConfigDict(
@@ -96,15 +120,18 @@ def load_accounts(config_path: str | None = None) -> list[dict[str, Any]]:
     Raises:
         FileNotFoundError: If accounts.yaml does not exist.
     """
+    from typing import cast
+
     path = Path(config_path) if config_path else Path(settings.accounts_config_path)
     if not path.exists():
         raise FileNotFoundError(f"Accounts config not found: {path}")
 
     with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        data = cast(dict[str, Any], yaml.safe_load(f))
 
-    return data.get("accounts", [])
+    accounts = data.get("accounts", [])
+    return cast(list[dict[str, Any]], accounts)
 
 
 # Singleton instance - import this to access settings throughout the application
-settings = Settings()
+settings = Settings()  # type: ignore[call-arg]

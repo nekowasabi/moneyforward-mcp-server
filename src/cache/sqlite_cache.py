@@ -8,7 +8,7 @@ This module provides a CacheManager class that handles:
 
 import asyncio
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -123,7 +123,7 @@ class CacheManager:
 
             # Check TTL
             expires_at = datetime.fromisoformat(row["expires_at"])
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             if now > expires_at:
                 logger.debug("cache_expired", key=key)
@@ -149,7 +149,7 @@ class CacheManager:
             await self.initialize()
 
         ttl_seconds = ttl if ttl is not None else self.default_ttl
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+        expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
 
         async with self._lock:
             await self._db.execute(  # type: ignore
@@ -192,16 +192,16 @@ class CacheManager:
         if not self._db:
             await self.initialize()
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         async with self._lock:
-            cursor = await self._db.execute(  # type: ignore
+            cursor = await self._db.execute(  # type: ignore[union-attr]
                 "DELETE FROM cache WHERE expires_at < ? RETURNING key",
                 (now,),
             )
             deleted_rows = await cursor.fetchall()
-            count = len(deleted_rows)
-            await self._db.commit()  # type: ignore
+            count = len(list(deleted_rows))
+            await self._db.commit()  # type: ignore[union-attr]
 
             logger.info("cache_cleanup_completed", deleted_count=count)
             return count
@@ -236,7 +236,7 @@ class CacheManager:
         if not self._db:
             await self.initialize()
 
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
 
         async with self._lock:
             cursor = await self._db.execute(  # type: ignore

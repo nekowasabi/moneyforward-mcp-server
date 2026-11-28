@@ -5,8 +5,11 @@ from MoneyForward ME pages, including total assets, transactions, budget status,
 and account refresh operations.
 """
 
+import csv
+import io
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from typing import Any
 
 import structlog
@@ -16,6 +19,237 @@ from src.browser.auth import AuthManager
 from src.browser.context import BrowserManager
 
 logger = structlog.get_logger(__name__)
+
+
+MF_CSV_COLUMNS = [
+    "計算対象",
+    "日付",
+    "内容",
+    "金額（円）",
+    "保有金融機関",
+    "大項目",
+    "中項目",
+    "メモ",
+    "振替",
+    "ID",
+]
+
+
+def build_monthly_csv_url(selectors: dict[str, Any], year: int, month: int) -> str:
+    """Build monthly CSV URL from selectors.yaml template."""
+    template = ""
+    try:
+        template = str(selectors.get("monthly_csv", {}).get("url_template", ""))
+    except (AttributeError, TypeError):
+        template = ""
+    if not template:
+        template = "https://moneyforward.com/cf/csv?from={from_date}&month={month}&year={year}"
+    from_date = f"{year:04d}/{month:02d}/01"
+    return template.format(from_date=from_date, month=month, year=year)
+
+
+def build_monthly_url(selectors: dict[str, Any], year: int, month: int) -> str:
+    """Build monthly HTML URL from selectors.yaml template."""
+    template = ""
+    try:
+        template = str(selectors.get("monthly_transactions", {}).get("url_template", ""))
+    except (AttributeError, TypeError):
+        template = ""
+    if not template:
+        try:
+            template = str(selectors.get("transactions", {}).get("url", ""))
+        except (AttributeError, TypeError):
+            template = ""
+    if not template or "{from_date}" not in template:
+        base = template or "https://moneyforward.com/cf"
+        from_date = f"{year:04d}/{month:02d}/01"
+        sep = "&" if "?" in base else "?"
+        return f"{base}{sep}from={from_date}&month={month}&year={year}"
+    from_date = f"{year:04d}/{month:02d}/01"
+    return template.format(from_date=from_date, month=month, year=year)
+
+
+def _normalize_mf_row(row: dict[str, str]) -> dict[str, Any]:
+    date_raw = (row.get("日付") or "").strip()
+    amount_raw = (row.get("金額（円）") or "0").strip()
+    # Amount may include commas; keep sign
+    cleaned = re.sub(r"[,\s円￥¥]", "", amount_raw)
+    try:
+        amount = int(cleaned) if cleaned not in ("", "-", "+") else 0
+    except ValueError:
+        try:
+            amount = int(float(cleaned))
+        except ValueError:
+            amount = 0
+    calc = (row.get("計算対象") or "").strip()
+    transfer_raw = (row.get("振替") or "").strip()
+    is_transfer = transfer_raw not in ("", "0", "対象外", "-")
+    # MF uses "振替" column with values like "" or "振替"; treat truthy text as transfer
+    if transfer_raw in ("振替", "○", "1", "true"):
+        is_transfer = True
+    elif transfer_raw == "":
+        is_transfer = False
+    return {
+        "date": date_raw,
+        "description": (row.get("内容") or "").strip(),
+        "amount": amount,
+        "institution": (row.get("保有金融機関") or "").strip(),
+        "major_category": (row.get("大項目") or "").strip(),
+        "minor_category": (row.get("中項目") or "").strip(),
+        "memo": (row.get("メモ") or "").strip(),
+        "is_transfer": is_transfer,
+        "mf_id": (row.get("ID") or "").strip(),
+        "calc_target": calc,
+    }
+
+
+def parse_mf_csv_text(text: str) -> list[dict[str, Any]]:
+    """Parse MF CSV text into transaction dicts (pure, testable)."""
+    # Strip BOM if present
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    reader = csv.DictReader(io.StringIO(text))
+    out: list[dict[str, Any]] = []
+    for row in reader:
+        if row is None:
+            continue
+        # Normalize keys (strip spaces)
+        norm = {(k or "").strip(): (v or "") for k, v in row.items()}
+        if not any(v.strip() for v in norm.values()):
+            continue
+        out.append(_normalize_mf_row(norm))
+    return out
+
+
+def parse_mf_csv_bytes(data: bytes) -> list[dict[str, Any]]:
+    """Parse MF CSV bytes, trying UTF-8 (BOM) then Shift_JIS/CP932."""
+    last_error: Exception | None = None
+    for encoding in ("utf-8-sig", "utf-8", "cp932", "shift_jis"):
+        try:
+            text = data.decode(encoding)
+            return parse_mf_csv_text(text)
+        except (UnicodeDecodeError, UnicodeError) as e:
+            last_error = e
+            continue
+    raise ValueError(f"Unable to decode MF CSV bytes: {last_error}")
+
+
+def filter_transactions_by_institution(
+    transactions: list[dict[str, Any]], institution: str | None
+) -> list[dict[str, Any]]:
+    """Filter transactions by institution name (substring, case-insensitive)."""
+    if not institution:
+        return transactions
+    needle = institution.casefold().strip()
+    return [t for t in transactions if needle in str(t.get("institution", "")).casefold()]
+
+
+class _TableParser(HTMLParser):
+    """Very defensive HTML table parser for MF transaction fallback."""
+
+    def __init__(self) -> None:
+        """Initialize parser state."""
+        super().__init__()
+        self.in_td = False
+        self.in_th = False
+        self.current_cell = ""
+        self.current_row: list[str] = []
+        self.rows: list[list[str]] = []
+        self.in_tr = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Track table cell starts."""
+        if tag == "tr":
+            self.in_tr = True
+            self.current_row = []
+        elif tag in ("td", "th"):
+            self.in_td = tag == "td"
+            self.in_th = tag == "th"
+            self.current_cell = ""
+
+    def handle_endtag(self, tag: str) -> None:
+        """Track table cell ends."""
+        if tag in ("td", "th"):
+            self.current_row.append(self.current_cell.strip())
+            self.in_td = False
+            self.in_th = False
+        elif tag == "tr":
+            if self.current_row:
+                self.rows.append(self.current_row)
+            self.in_tr = False
+            self.current_row = []
+
+    def handle_data(self, data: str) -> None:
+        """Collect cell text."""
+        if self.in_td or self.in_th:
+            self.current_cell += data
+
+
+def parse_mf_transactions_html(html: str) -> list[dict[str, Any]]:
+    """Parse MF transaction HTML table into dicts (fallback path)."""
+    parser = _TableParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for cells in parser.rows:
+        if len(cells) < 3:
+            continue
+        # Heuristic: skip header rows containing 日付/内容/金額
+        joined = "".join(cells)
+        if "日付" in joined and "内容" in joined:
+            continue
+        # Map positionally: date, description, amount, category...
+        date_raw = cells[0] if len(cells) > 0 else ""
+        desc = cells[1] if len(cells) > 1 else ""
+        amount_raw = cells[2] if len(cells) > 2 else "0"
+        category = cells[3] if len(cells) > 3 else ""
+        if not desc and not date_raw:
+            continue
+        cleaned = re.sub(r"[,\s円￥¥]", "", amount_raw)
+        try:
+            amount = int(cleaned) if cleaned not in ("", "-", "+") else 0
+        except ValueError:
+            amount = 0
+        out.append(
+            {
+                "date": date_raw.strip(),
+                "description": desc.strip(),
+                "amount": amount,
+                "institution": "",
+                "major_category": category.strip(),
+                "minor_category": "",
+                "memo": "",
+                "is_transfer": False,
+                "mf_id": "",
+                "calc_target": "",
+            }
+        )
+    return out
+
+
+def parse_institutions_html(html: str) -> list[dict[str, Any]]:
+    """Parse institution entries from accounts HTML (defensive)."""
+    parser = _TableParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for cells in parser.rows:
+        if not cells:
+            continue
+        name = cells[0].strip() if len(cells) > 0 else ""
+        if not name or name in ("金融機関", "口座", "保有金融機関"):
+            continue
+        entry: dict[str, Any] = {"name": name}
+        if len(cells) > 1:
+            entry["type"] = cells[1].strip()
+        if len(cells) > 2:
+            entry["status"] = cells[2].strip()
+        out.append(entry)
+    return out
 
 
 class ScraperError(Exception):
@@ -160,15 +394,11 @@ class MoneyForwardScraper:
             for i, row in enumerate(rows[:limit]):
                 try:
                     # Extract transaction data
-                    date_text = await row.query_selector(
-                        self.selectors["transactions"]["date"]
-                    )
+                    date_text = await row.query_selector(self.selectors["transactions"]["date"])
                     description_text = await row.query_selector(
                         self.selectors["transactions"]["description"]
                     )
-                    amount_text = await row.query_selector(
-                        self.selectors["transactions"]["amount"]
-                    )
+                    amount_text = await row.query_selector(self.selectors["transactions"]["amount"])
                     category_text = await row.query_selector(
                         self.selectors["transactions"]["category"]
                     )
@@ -176,16 +406,12 @@ class MoneyForwardScraper:
                     transaction = {
                         "date": await date_text.inner_text() if date_text else "",
                         "description": (
-                            await description_text.inner_text()
-                            if description_text
-                            else ""
+                            await description_text.inner_text() if description_text else ""
                         ),
                         "amount": self._parse_currency(
                             await amount_text.inner_text() if amount_text else "0"
                         ),
-                        "category": (
-                            await category_text.inner_text() if category_text else ""
-                        ),
+                        "category": (await category_text.inner_text() if category_text else ""),
                     }
 
                     transactions.append(transaction)
@@ -213,6 +439,125 @@ class MoneyForwardScraper:
             )
             raise ScraperError(f"Failed to scrape transactions: {e}") from e
 
+        finally:
+            await page.close()
+
+    async def list_financial_institutions(self) -> list[dict[str, Any]]:
+        """List 保有金融機関 from the accounts page.
+
+        Returns:
+            List of dicts with name, type, last_updated/status when available.
+
+        Raises:
+            ScraperError: If scraping fails.
+        """
+        logger.info("scraping_financial_institutions")
+        await self.auth.ensure_authenticated()
+        page = await self.browser.new_page()
+        try:
+            accounts_cfg: dict[str, Any] = {}
+            if isinstance(self.selectors.get("accounts"), dict):
+                accounts_cfg = self.selectors["accounts"]
+            url = str(accounts_cfg.get("url", "https://moneyforward.com/accounts"))
+            await self._navigate_and_wait(page, url)
+
+            institutions: list[dict[str, Any]] = []
+            try:
+                item_selector = str(accounts_cfg.get("institution_item", ".account-list-item"))
+                name_selector = str(accounts_cfg.get("institution_name", ".account-name"))
+                type_selector = str(accounts_cfg.get("institution_type", ".account-type"))
+                status_selector = str(accounts_cfg.get("status_indicator", ".account-status"))
+                items = await page.query_selector_all(item_selector)
+                for item in items:
+                    try:
+                        name_el = await item.query_selector(name_selector)
+                        name = (await name_el.inner_text()).strip() if name_el else ""
+                        if not name:
+                            continue
+                        entry: dict[str, Any] = {"name": name}
+                        type_el = await item.query_selector(type_selector)
+                        if type_el:
+                            entry["type"] = (await type_el.inner_text()).strip()
+                        status_el = await item.query_selector(status_selector)
+                        if status_el:
+                            entry["status"] = (await status_el.inner_text()).strip()
+                        institutions.append(entry)
+                    except Exception as e:
+                        logger.warning("institution_row_parse_error", error=str(e))
+                        continue
+            except Exception as e:
+                logger.warning("institution_selector_parse_failed", error=str(e))
+
+            if not institutions:
+                # Fallback: parse raw HTML defensively
+                try:
+                    html = await page.content()
+                    institutions = parse_institutions_html(html)
+                except Exception as e:
+                    logger.warning("institution_html_fallback_failed", error=str(e))
+
+            logger.info("institutions_scraped_successfully", count=len(institutions))
+            return institutions
+        except Exception as e:
+            logger.error("institutions_scraping_failed", error=str(e), exc_info=True)
+            raise ScraperError(f"Failed to list institutions: {e}") from e
+        finally:
+            await page.close()
+
+    async def get_monthly_transactions(
+        self,
+        year: int,
+        month: int,
+        institution: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get transactions for a month, optionally filtered by institution.
+
+        Prefers the CSV endpoint with HTML table fallback.
+
+        Args:
+            year: Year (e.g. 2026).
+            month: Month 1-12.
+            institution: Optional institution (card) name filter.
+
+        Raises:
+            ScraperError: If scraping fails.
+            ValueError: If year/month are invalid.
+        """
+        if not 1 <= month <= 12:
+            raise ValueError(f"Invalid month: {month}")
+        logger.info(
+            "scraping_monthly_transactions",
+            year=year,
+            month=month,
+            institution=institution,
+        )
+        await self.auth.ensure_authenticated()
+        csv_url = build_monthly_csv_url(self.selectors, year, month)
+        # Try CSV via authenticated request context first
+        try:
+            context = await self.browser.get_context()
+            response = await context.request.get(csv_url)
+            if response.ok:
+                body = await response.body()
+                parsed = parse_mf_csv_bytes(bytes(body))
+                return filter_transactions_by_institution(parsed, institution)
+            else:
+                logger.warning("monthly_csv_request_failed", status=response.status)
+        except Exception as e:
+            logger.warning("monthly_csv_download_failed", error=str(e))
+
+        # HTML fallback
+        page = await self.browser.new_page()
+        try:
+            html_url = build_monthly_url(self.selectors, year, month)
+            await self._navigate_and_wait(page, html_url)
+            try:
+                html = await page.content()
+                parsed = parse_mf_transactions_html(html)
+                # HTML fallback lacks institution; filter only if present
+                return filter_transactions_by_institution(parsed, institution)
+            except Exception as e:
+                raise ScraperError(f"Failed HTML fallback for monthly transactions: {e}") from e
         finally:
             await page.close()
 
@@ -436,9 +781,7 @@ class MoneyForwardScraper:
             count = await account_link.count()
 
             if count == 0:
-                await page.screenshot(
-                    path="/tmp/manual_accounts_not_found.png", full_page=True
-                )
+                await page.screenshot(path="/tmp/manual_accounts_not_found.png", full_page=True)
                 raise ScraperError(
                     f"Account '{mf_display_name}' not found on accounts page. "
                     "Check /tmp/manual_accounts_not_found.png for page state."
@@ -451,15 +794,11 @@ class MoneyForwardScraper:
             await account_link.first.click()
             await page.wait_for_load_state("networkidle")
 
-            await page.screenshot(
-                path="/tmp/manual_account_detail.png", full_page=True
-            )
+            await page.screenshot(path="/tmp/manual_account_detail.png", full_page=True)
 
             # Step 3: Check if an existing asset entry exists for this account
             # Each entry has a "change" button (btn-asset-action linking to a modal)
-            change_btn = page.locator(
-                'a.btn-asset-action:not([data-method="delete"])'
-            )
+            change_btn = page.locator('a.btn-asset-action:not([data-method="delete"])')
             has_existing = await change_btn.count() > 0
 
             if has_existing:
@@ -478,8 +817,7 @@ class MoneyForwardScraper:
                 await value_input.fill(str(amount_jpy))
 
                 submit_btn = page.locator(
-                    '.modal.in input[type="submit"],'
-                    ' .modal.show input[type="submit"]'
+                    '.modal.in input[type="submit"], .modal.show input[type="submit"]'
                 )
                 await submit_btn.first.click()
                 await page.wait_for_load_state("networkidle")
@@ -490,9 +828,7 @@ class MoneyForwardScraper:
                 await page.wait_for_timeout(500)
 
                 # Select asset subclass: "外貨預金" (id=3)
-                asset_type = self.selectors["manual_accounts"].get(
-                    "default_asset_subclass_id", "3"
-                )
+                asset_type = self.selectors["manual_accounts"].get("default_asset_subclass_id", "3")
                 subclass_select = page.locator(
                     '#modal_asset_new select[name="user_asset_det[asset_subclass_id]"]'
                 )
@@ -500,27 +836,19 @@ class MoneyForwardScraper:
                 await subclass_select.select_option(value=asset_type)
 
                 # Fill name
-                name_input = page.locator(
-                    '#modal_asset_new input[name="user_asset_det[name]"]'
-                )
+                name_input = page.locator('#modal_asset_new input[name="user_asset_det[name]"]')
                 await name_input.fill(f"{mf_display_name} ({currency})")
 
                 # Fill amount
-                value_input = page.locator(
-                    '#modal_asset_new input[name="user_asset_det[value]"]'
-                )
+                value_input = page.locator('#modal_asset_new input[name="user_asset_det[value]"]')
                 await value_input.fill(str(amount_jpy))
 
                 # Submit
-                submit_btn = page.locator(
-                    '#modal_asset_new input[type="submit"]'
-                )
+                submit_btn = page.locator('#modal_asset_new input[type="submit"]')
                 await submit_btn.first.click()
                 await page.wait_for_load_state("networkidle")
 
-            await page.screenshot(
-                path="/tmp/manual_account_saved.png", full_page=True
-            )
+            await page.screenshot(path="/tmp/manual_account_saved.png", full_page=True)
 
             logger.info(
                 "manual_account_balance_updated",
@@ -537,9 +865,7 @@ class MoneyForwardScraper:
                 error=str(e),
                 exc_info=True,
             )
-            raise ScraperError(
-                f"Failed to update manual account '{mf_display_name}': {e}"
-            ) from e
+            raise ScraperError(f"Failed to update manual account '{mf_display_name}': {e}") from e
 
         finally:
             await page.close()

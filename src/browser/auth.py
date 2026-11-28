@@ -222,7 +222,7 @@ class AuthManager:
         # Click the first account (current account)
         try:
             # Look for the account email link
-            account_link = await page.query_selector(f'a[href*="sign_in"]')
+            account_link = await page.query_selector('a[href*="sign_in"]')
             if not account_link:
                 # Try clicking the first account option
                 account_link = await page.query_selector('.account-list a, [data-testid="account"]')
@@ -231,7 +231,7 @@ class AuthManager:
                 await account_link.click()
             else:
                 # Fallback: click any link containing the user's email
-                await page.click(f'text={settings.mf_email}')
+                await page.click(f"text={settings.mf_email}")
 
             await page.wait_for_load_state("networkidle")
             logger.info("account_selected", url=page.url)

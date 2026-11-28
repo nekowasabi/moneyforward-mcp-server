@@ -14,6 +14,7 @@ from src.tools.common import build_error_response, build_success_response
 
 logger = structlog.get_logger(__name__)
 
+
 async def list_manual_accounts() -> dict[str, Any]:
     """List manual accounts from accounts.yaml configuration.
 
@@ -138,9 +139,7 @@ async def update_manual_account(
 
         # Update on MoneyForward ME
         mf_display_name = target["mf_display_name"]
-        await scraper.update_manual_account_balance(
-            mf_display_name, amount_jpy, currency=currency
-        )
+        await scraper.update_manual_account_balance(mf_display_name, amount_jpy, currency=currency)
 
         from datetime import datetime, timedelta, timezone
 

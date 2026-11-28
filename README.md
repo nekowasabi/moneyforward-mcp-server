@@ -156,6 +156,53 @@ cp accounts.yaml.example accounts.yaml
 
 `accounts.yaml` は機密情報を含むため `.gitignore` 対象です。
 
+## カード明細の振り分け
+
+クレジットカード明細を BUSINESS（事業用）/ PERSONAL（私用）/ PRORATED（按分）/ REVIEW（要確認）に自動仕分けします。
+
+### セットアップ
+
+```bash
+cp card_rules.yaml.example ~/.config/moneyforward-mcp/card_rules.yaml
+# ~/.config/moneyforward-mcp/card_rules.yaml を編集
+```
+
+環境変数（`.env` に設定、`~/.config/...` 形式のパス推奨）:
+
+| 変数名 | デフォルト | 説明 |
+|--------|-----------|------|
+| `CARD_RULES_PATH` | `~/.config/moneyforward-mcp/card_rules.yaml` | 分類ルール YAML |
+| `CARD_DECISIONS_PATH` | `~/.config/moneyforward-mcp/decisions.json` | 学習済み判定の保存先 |
+| `AMAZON_ORDERS_CSV` | - | Amazon 注文履歴 CSV（任意） |
+| `RECEIPTS_ROOT` | - | Drive for desktop 同期ルート（例: `~/Google Drive`）。`<root>/電子取引/YYYY-MM` を参照 |
+| `GOOGLE_DRIVE_ACCESS_TOKEN` | - | Drive API v3 用トークン（ログ出力しません） |
+| `GOOGLE_DRIVE_ROOT_FOLDER_ID` | - | 任意。`電子取引` フォルダの親フォルダ ID |
+| `CARD_REPORT_DIR` | `~/.local/share/moneyforward-mcp/reports` | レポート出力先 |
+
+### 使い方（CLI）
+
+```bash
+# オフライン分類（MF の CSV エクスポートを利用）
+python -m src.statements.cli classify --month 2026-10 --statement-csv ./statement.csv --format both
+
+# Amazon CSV を併用
+python -m src.statements.cli classify --month 2026-10 --statement-csv ./statement.csv --amazon-csv ./orders.csv
+
+# 判定を学習させる
+python -m src.statements.cli decide --description "Example Store" --classification BUSINESS --reason "事業用備品" --decisions ~/.config/moneyforward-mcp/decisions.json
+
+# 一覧・対話レビュー
+python -m src.statements.cli decisions --decisions ~/.config/moneyforward-mcp/decisions.json
+python -m src.statements.cli review --month 2026-10 --statement-csv ./statement.csv
+```
+
+判定は `decisions.json` に保存され、翌月以降はルールより優先されます（`source: decision`）。
+
+### 領収書・プライバシー
+
+- 領収書は `電子取引/YYYY-MM` フォルダのファイル名（日付・金額・取引先）で突合します。金額ありの場合のみ金額一致を要求し、日付は ±3 日で照合します。
+- 個人データ・トークン・絶対パスはリポジトリに含めないでください。設定・判定・レポートはすべてホームディレクトリ配下に保存され、`.gitignore` 対象です。
+
 ## Claude Code との連携
 
 ### .mcp.json

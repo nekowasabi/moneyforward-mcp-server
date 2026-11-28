@@ -51,6 +51,32 @@ refresh:
   status_indicator: ".refresh-status"
   last_updated: ".last-updated"
 
+accounts:
+  url: "https://moneyforward.com/accounts"
+  institution_list: ".account-list"
+  institution_item: ".account-list-item"
+  institution_name: ".account-name"
+  institution_type: ".account-type"
+  last_updated: ".last-updated"
+  status_indicator: ".account-status"
+
+monthly_csv:
+  url_template: "https://moneyforward.com/cf/csv?from={from_date}&month={month}&year={year}"
+  columns:
+    - "計算対象"
+    - "日付"
+    - "内容"
+    - "金額（円）"
+    - "保有金融機関"
+    - "大項目"
+    - "中項目"
+    - "メモ"
+    - "振替"
+    - "ID"
+
+monthly_transactions:
+  url_template: "https://moneyforward.com/cf?from={from_date}&month={month}&year={year}"
+
 manual_accounts:
   accounts_url: "https://moneyforward.com/accounts"
   default_asset_subclass_id: "3"  # 外貨預金
