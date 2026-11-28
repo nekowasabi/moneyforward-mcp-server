@@ -34,7 +34,8 @@ async def list_recent_transactions(
             - date: Transaction date
             - description: Transaction description
             - amount: Amount in JPY
-            - category: Transaction category
+            - category: Transaction category (大項目)
+            - subcategory: Transaction subcategory (中項目)
 
     Examples:
         >>> response = await list_recent_transactions(scraper, cache, count=10)

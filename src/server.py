@@ -202,6 +202,7 @@ async def list_recent_transactions(count: int = 20) -> dict[str, Any]:
                     - description: Transaction description (str)
                     - amount: Amount in JPY (int)
                     - category: Transaction category (str)
+                    - subcategory: Transaction subcategory, e.g. 外食 (str)
             - metadata: Response metadata
     """
     from src.tools.transactions import list_recent_transactions as list_txns_impl

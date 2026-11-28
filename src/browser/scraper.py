@@ -364,7 +364,8 @@ class MoneyForwardScraper:
                 - date: Transaction date (str)
                 - description: Transaction description (str)
                 - amount: Transaction amount in JPY (int)
-                - category: Transaction category (str)
+                - category: Transaction category / 大項目 (str)
+                - subcategory: Transaction subcategory / 中項目 (str)
 
         Raises:
             ScraperError: If scraping fails.
@@ -402,6 +403,9 @@ class MoneyForwardScraper:
                     category_text = await row.query_selector(
                         self.selectors["transactions"]["category"]
                     )
+                    subcategory_text = await row.query_selector(
+                        self.selectors["transactions"]["subcategory"]
+                    )
 
                     transaction = {
                         "date": await date_text.inner_text() if date_text else "",
@@ -411,7 +415,16 @@ class MoneyForwardScraper:
                         "amount": self._parse_currency(
                             await amount_text.inner_text() if amount_text else "0"
                         ),
-                        "category": (await category_text.inner_text() if category_text else ""),
+                        "category": (
+                            (await category_text.inner_text()).strip()
+                            if category_text
+                            else ""
+                        ),
+                        "subcategory": (
+                            (await subcategory_text.inner_text()).strip()
+                            if subcategory_text
+                            else ""
+                        ),
                     }
 
                     transactions.append(transaction)
